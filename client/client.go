@@ -87,6 +87,7 @@ func NewClient(config *Config) (*Client, error) {
 
 	if p := config.HTTPProxy; p != "" {
 		client.httpProxyURL, err = url.Parse(p)
+		client.httpProxyURL.Scheme = websocket.Scheme
 		if err != nil {
 			return nil, fmt.Errorf("Invalid proxy URL (%s)", err)
 		}
