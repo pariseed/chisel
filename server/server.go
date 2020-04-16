@@ -11,7 +11,7 @@ import (
 	"regexp"
 
 	socks5 "github.com/armon/go-socks5"
-	"github.com/gorilla/websocket"
+	"github.com/pariseed/websocket"
 	chshare "github.com/jpillora/chisel/share"
 	"github.com/jpillora/requestlog"
 	"golang.org/x/crypto/ssh"

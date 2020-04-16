@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/pariseed/websocket"
 	"github.com/jpillora/backoff"
 	chshare "github.com/jpillora/chisel/share"
 	"golang.org/x/crypto/ssh"
