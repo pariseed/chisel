@@ -158,7 +158,8 @@ func (c *Client) verifyServer(hostname string, remote net.Addr, key ssh.PublicKe
 func (c *Client) Start(ctx context.Context) error {
 	via := ""
 	if c.httpProxyURL != nil {
-		via = " via " + c.httpProxyURL.String()
+		purl := strings.Join(strings.SplitN(c.httpProxyURL.String(), "//", -1), "")
+		via = " via " + purl
 	}
 	//prepare non-reverse proxies
 	for i, r := range c.config.shared.Remotes {
