@@ -7,23 +7,18 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"encoding/base64"
+	"strings"
 
-	"github.com/jpillora/chisel/client"
+	"github.com/pariseed/chisel/client"
 	"github.com/jpillora/chisel/server"
 	chshare "github.com/jpillora/chisel/share"
 )
 
 var help = `
-  Usage: chisel [command] [--help]
+  Usage: bin [command] [--help]
 
   Version: ` + chshare.BuildVersion + `
-
-  Commands:
-    server - runs chisel in server mode
-    client - runs chisel in client mode
-
-  Read more:
-    https://github.com/jpillora/chisel
 
 `
 
@@ -68,15 +63,12 @@ var commonHelp = `
     --help, This help text
 
   Signals:
-    The chisel process is listening for:
+    The bin process is listening for:
       a SIGUSR2 to print process stats, and
       a SIGHUP to short-circuit the client reconnect timer
 
   Version:
     ` + chshare.BuildVersion + `
-
-  Read more:
-    https://github.com/jpillora/chisel
 
 `
 
@@ -88,7 +80,7 @@ func generatePidFile() {
 }
 
 var serverHelp = `
-  Usage: chisel server [options]
+  Usage: bin server [options]
 
   Options:
 
@@ -121,11 +113,11 @@ var serverHelp = `
     authfile with {"<user:pass>": [""]}.
 
     --proxy, Specifies another HTTP server to proxy requests to when
-    chisel receives a normal HTTP request. Useful for hiding chisel in
+    bin receives a normal HTTP request. Useful for hiding bin in
     plain sight.
 
     --socks5, Allow clients to access the internal SOCKS5 proxy. See
-    chisel client --help for more information.
+    bin client --help for more information.
 
     --reverse, Allow clients to specify reverse port forwarding remotes
     in addition to normal remotes.
@@ -193,9 +185,9 @@ func server(args []string) {
 }
 
 var clientHelp = `
-  Usage: chisel client [options] <server> <remote> [remote] [remote] ...
+  Usage: bin client [options] <server> <remote> [remote] [remote] ...
 
-  <server> is the URL to the chisel server.
+  <server> is the URL to the bin server.
 
   <remote>s are remote connections tunneled through the server, each of
   which come in the form:
@@ -225,13 +217,13 @@ var clientHelp = `
       5000:socks
       R:2222:localhost:22
 
-    When the chisel server has --socks5 enabled, remotes can
+    When the bin server has --socks5 enabled, remotes can
     specify "socks" in place of remote-host and remote-port.
     The default local host and port for a "socks" remote is
     127.0.0.1:1080. Connections to this remote will terminate
     at the server's internal SOCKS5 proxy.
 
-    When the chisel server has --reverse enabled, remotes can
+    When the bin server has --reverse enabled, remotes can
     be prefixed with R to denote that they are reversed. That
     is, the server will listen and accept connections, and they
     will be proxied through the client which specified the remote.
@@ -261,12 +253,18 @@ var clientHelp = `
     disconnection. Defaults to 5 minutes.
 
     --proxy, An optional HTTP CONNECT proxy which will be used reach
-    the chisel server. Authentication can be specified inside the URL.
+    the bin server. Authentication can be specified inside the URL.
     For example, http://admin:password@my-server.com:8081
 
     --hostname, Optionally set the 'Host' header (defaults to the host
     found in the server url).
 ` + commonHelp
+
+
+func IsBase64(s string) bool {
+	_, err := base64.StdEncoding.DecodeString(s)
+	return err == nil
+}
 
 func client(args []string) {
 
@@ -293,6 +291,13 @@ func client(args []string) {
 	}
 	if *auth == "" {
 		*auth = os.Getenv("AUTH")
+	}
+
+	if IsBase64(*proxy) == true {
+		basebyte,_ := base64.StdEncoding.DecodeString(*proxy)
+		basestring := string(basebyte)
+		base := strings.TrimSuffix(basestring, "\n")
+		*proxy = base
 	}
 	c, err := chclient.NewClient(&chclient.Config{
 		Fingerprint:      *fingerprint,
