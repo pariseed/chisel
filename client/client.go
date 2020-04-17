@@ -13,9 +13,18 @@ import (
 
 	"github.com/pariseed/websocket"
 	"github.com/jpillora/backoff"
+	"github.com/launchdarkly/go-ntlm-proxy-auth"
 	chshare "github.com/jpillora/chisel/share"
 	"golang.org/x/crypto/ssh"
 )
+
+
+var isntlm bool = false
+var ntlmdomain = ""
+var ntlmusr = "" 
+var ntlmpwd = ""
+var ntlmurl = ""
+
 
 //Config represents a client configuration
 type Config struct {
@@ -86,8 +95,26 @@ func NewClient(config *Config) (*Client, error) {
 	client.Info = true
 
 	if p := config.HTTPProxy; p != "" {
+
+		urlrgx := regexp.MustCompile("htt.*://")
+		ntlmrgx := regexp.MustCompile("(NTLM)þ(.*):(.*):(.*)@")
+		ntlmfind := ntlmrgx.FindStringSubmatch(p)
+
+		if len(ntlmfind) == 0 {
+			;;
+		} else {
+			isntlm = true
+			ntlmdomain = ntlmfind[2]
+			ntlmusr = ntlmfind[3]
+			ntlmpwd = ntlmfind[4]
+
+			p = ntlmrgx.ReplaceAllString(p, "")
+			ntlmurl = urlrgx.ReplaceAllString(p, "")
+		}
+
 		client.httpProxyURL, err = url.Parse(p)
 		client.httpProxyURL.Scheme = websocket.Scheme
+
 		if err != nil {
 			return nil, fmt.Errorf("Invalid proxy URL (%s)", err)
 		}
@@ -194,10 +221,24 @@ func (c *Client) connectionLoop() {
 			HandshakeTimeout: 45 * time.Second,
 			Subprotocols:     []string{chshare.ProtocolVersion},
 		}
+		daler := &net.Dialer{
+		    Timeout:   30 * time.Second,
+		    KeepAlive: 30 * time.Second,
+		}
 		//optionally CONNECT proxy
 		if c.httpProxyURL != nil {
-			d.Proxy = func(*http.Request) (*url.URL, error) {
-				return c.httpProxyURL, nil
+
+			if isntlm == true {
+				ntlmDialContext := ntlm.WrapDialContext(daler.DialContext, ntlmurl, ntlmusr, ntlmpwd, ntlmdomain)
+				d.NetDialContext = ntlmDialContext
+
+				d.Proxy = func(*http.Request) (*url.URL, error) {
+					return c.httpProxyURL, nil
+				}
+			} else {
+				d.Proxy = func(*http.Request) (*url.URL, error) {
+					return c.httpProxyURL, nil
+				}
 			}
 		}
 		wsHeaders := http.Header{}
