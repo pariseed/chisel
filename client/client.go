@@ -21,7 +21,7 @@ import (
 
 var isntlm bool = false
 var ntlmdomain = ""
-var ntlmusr = "" 
+var ntlmusr = ""
 var ntlmpwd = ""
 var ntlmurl = ""
 
@@ -113,11 +113,11 @@ func NewClient(config *Config) (*Client, error) {
 		}
 
 		client.httpProxyURL, err = url.Parse(p)
-		client.httpProxyURL.Scheme = websocket.Scheme
-
 		if err != nil {
 			return nil, fmt.Errorf("Invalid proxy URL (%s)", err)
 		}
+
+		client.httpProxyURL.Scheme = websocket.Scheme
 	}
 
 	user, pass := chshare.ParseAuth(config.Auth)
