@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"os"
 
 	"github.com/pariseed/websocket"
 	"github.com/jpillora/backoff"
@@ -25,7 +24,6 @@ var ntlmdomain = ""
 var ntlmusr = ""
 var ntlmpwd = ""
 var ntlmurl = ""
-var Stop string
 
 
 //Config represents a client configuration
@@ -184,12 +182,6 @@ func (c *Client) Start(ctx context.Context) error {
 
 func (c *Client) keepAliveLoop() {
 	for c.running {
-		if Stop == "true" {
-		//	c.sshConn.Close()
-			return
-		}
-
-
 		time.Sleep(c.config.KeepAlive)
 		if c.sshConn != nil {
 			c.sshConn.SendRequest("ping", true, nil)
@@ -202,36 +194,27 @@ func (c *Client) connectionLoop() {
 	var connerr error
 	b := &backoff.Backoff{Max: c.config.MaxRetryInterval}
 	for c.running {
-		if Stop == "true" {
-		//	c.sshConn.Close()
-			return
-		}
-
-
 		if connerr != nil {
-			Stop = "true"
-
-//			attempt := int(b.Attempt())
-//			maxAttempt := c.config.MaxRetryCount
-//			d := b.Duration()
-//			//show error and attempt counts
-//			msg := fmt.Sprintf("Connection error: %s", connerr)
-//			if attempt > 0 {
-//				msg += fmt.Sprintf(" (Attempt: %d", attempt)
-//				if maxAttempt > 0 {
-//					msg += fmt.Sprintf("/%d", maxAttempt)
-//				}
-//				msg += ")"
-//			}
-//			c.Debugf(msg)
-//			//give up?
-//			if maxAttempt >= 0 && attempt >= maxAttempt {
-//				break
-//			}
-//			c.Infof("Retrying in %s...", d)
-//			connerr = nil
-//			chshare.SleepSignal(d)
-			return
+			attempt := int(b.Attempt())
+			maxAttempt := c.config.MaxRetryCount
+			d := b.Duration()
+			//show error and attempt counts
+			msg := fmt.Sprintf("Connection error: %s", connerr)
+			if attempt > 0 {
+				msg += fmt.Sprintf(" (Attempt: %d", attempt)
+				if maxAttempt > 0 {
+					msg += fmt.Sprintf("/%d", maxAttempt)
+				}
+				msg += ")"
+			}
+			c.Debugf(msg)
+			//give up?
+			if maxAttempt >= 0 && attempt >= maxAttempt {
+				break
+			}
+			c.Infof("Retrying in %s...", d)
+			connerr = nil
+			chshare.SleepSignal(d)
 		}
 		d := websocket.Dialer{
 			ReadBufferSize:   1024,
@@ -298,12 +281,6 @@ func (c *Client) connectionLoop() {
 		}
 		c.Infof("Connected (Latency %s)", time.Since(t0))
 		//connected
-
-		os.OpenFile("./.start", os.O_RDONLY|os.O_CREATE, 0666)
-		if Stop == "true" {
-			return
-		}
-
 		b.Reset()
 		c.sshConn = sshConn
 		go ssh.DiscardRequests(reqs)
@@ -342,10 +319,6 @@ func (c *Client) connectStreams(chans <-chan ssh.NewChannel) {
 		if err != nil {
 			c.Debugf("Failed to accept stream: %s", err)
 			continue
-		}
-		if Stop == "true" {
-			c.sshConn.Close()
-			return
 		}
 		go ssh.DiscardRequests(reqs)
 		l := c.Logger.Fork("conn#%d", c.connStats.New())
