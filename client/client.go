@@ -210,30 +210,35 @@ func (c *Client) connectionLoop() {
 
 
 		if connerr != nil {
-			c.Close()
-			Stop = "true"
+//			c.Close()
+//			Stop = "true"
+//			return
 
-//			attempt := int(b.Attempt())
+			attempt := int(b.Attempt())
 //			maxAttempt := c.config.MaxRetryCount
-//			d := b.Duration()
-//			//show error and attempt counts
-//			msg := fmt.Sprintf("Connection error: %s", connerr)
-//			if attempt > 0 {
-//				msg += fmt.Sprintf(" (Attempt: %d", attempt)
-//				if maxAttempt > 0 {
-//					msg += fmt.Sprintf("/%d", maxAttempt)
-//				}
-//				msg += ")"
-//			}
-//			c.Debugf(msg)
-//			//give up?
-//			if maxAttempt >= 0 && attempt >= maxAttempt {
+			maxAttempt := 2
+			d := b.Duration()
+			//show error and attempt counts
+			msg := fmt.Sprintf("Connection error: %s", connerr)
+			if attempt > 0 {
+				msg += fmt.Sprintf(" (Attempt: %d", attempt)
+				if maxAttempt > 0 {
+					msg += fmt.Sprintf("/%d", maxAttempt)
+				}
+				msg += ")"
+			}
+			c.Debugf(msg)
+			//give up?
+			if maxAttempt >= 0 && attempt >= maxAttempt {
+				c.Close()
+				Stop = "true"
+				return
 //				break
-//			}
+			}
 //			c.Infof("Retrying in %s...", d)
-//			connerr = nil
-//			chshare.SleepSignal(d)
-			return
+			connerr = nil
+			chshare.SleepSignal(d)
+
 		}
 		d := websocket.Dialer{
 			ReadBufferSize:   1024,
