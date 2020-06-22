@@ -1,324 +1,369 @@
-package main
+package chclient
 
 import (
-	"flag"
+	"context"
 	"fmt"
-	"io/ioutil"
-	"log"
-	"os"
-	"strconv"
-	"encoding/base64"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
+	"time"
+	"os"
 
-	"github.com/pariseed/chisel/client"
-	"github.com/jpillora/chisel/server"
+	"github.com/pariseed/websocket"
+	"github.com/jpillora/backoff"
+	"github.com/launchdarkly/go-ntlm-proxy-auth"
 	chshare "github.com/jpillora/chisel/share"
+	"golang.org/x/crypto/ssh"
 )
 
-var help = `
-  Usage: bin [command] [--help]
 
-  Version: ` + chshare.BuildVersion + `
+var isntlm bool = false
+var ntlmdomain = ""
+var ntlmusr = ""
+var ntlmpwd = ""
+var ntlmurl = ""
+var Stop string
 
-`
 
-func main() {
-
-	version := flag.Bool("version", false, "")
-	v := flag.Bool("v", false, "")
-	flag.Bool("help", false, "")
-	flag.Bool("h", false, "")
-	flag.Usage = func() {}
-	flag.Parse()
-
-	if *version || *v {
-		fmt.Println(chshare.BuildVersion)
-		os.Exit(1)
-	}
-
-	args := flag.Args()
-
-	subcmd := ""
-	if len(args) > 0 {
-		subcmd = args[0]
-		args = args[1:]
-	}
-
-	switch subcmd {
-	case "server":
-		server(args)
-	case "client":
-		client(args)
-	default:
-		fmt.Fprintf(os.Stderr, help)
-		os.Exit(1)
-	}
+//Config represents a client configuration
+type Config struct {
+	shared           *chshare.Config
+	Fingerprint      string
+	Auth             string
+	KeepAlive        time.Duration
+	MaxRetryCount    int
+	MaxRetryInterval time.Duration
+	Server           string
+	HTTPProxy        string
+	Remotes          []string
+	HostHeader       string
 }
 
-var commonHelp = `
-    --pid Generate pid file in current working directory
-
-    -v, Enable verbose logging
-
-    --help, This help text
-
-  Signals:
-    The bin process is listening for:
-      a SIGUSR2 to print process stats, and
-      a SIGHUP to short-circuit the client reconnect timer
-
-  Version:
-    ` + chshare.BuildVersion + `
-
-`
-
-func generatePidFile() {
-	pid := []byte(strconv.Itoa(os.Getpid()))
-	if err := ioutil.WriteFile("chisel.pid", pid, 0644); err != nil {
-		log.Fatal(err)
-	}
+//Client represents a client instance
+type Client struct {
+	*chshare.Logger
+	config       *Config
+	sshConfig    *ssh.ClientConfig
+	sshConn      ssh.Conn
+	httpProxyURL *url.URL
+	server       string
+	running      bool
+	runningc     chan error
+	connStats    chshare.ConnStats
 }
 
-var serverHelp = `
-  Usage: bin server [options]
-
-  Options:
-
-    --host, Defines the HTTP listening host – the network interface
-    (defaults the environment variable HOST and falls back to 0.0.0.0).
-
-    --port, -p, Defines the HTTP listening port (defaults to the environment
-    variable PORT and fallsback to port 8080).
-
-    --key, An optional string to seed the generation of a ECDSA public
-    and private key pair. All communications will be secured using this
-    key pair. Share the subsequent fingerprint with clients to enable detection
-    of man-in-the-middle attacks (defaults to the CHISEL_KEY environment
-    variable, otherwise a new key is generate each run).
-
-    --authfile, An optional path to a users.json file. This file should
-    be an object with users defined like:
-      {
-        "<user:pass>": ["<addr-regex>","<addr-regex>"]
-      }
-    when <user> connects, their <pass> will be verified and then
-    each of the remote addresses will be compared against the list
-    of address regular expressions for a match. Addresses will
-    always come in the form "<remote-host>:<remote-port>" for normal remotes
-    and "R:<local-interface>:<local-port>" for reverse port forwarding
-    remotes. This file will be automatically reloaded on change.
-
-    --auth, An optional string representing a single user with full
-    access, in the form of <user:pass>. This is equivalent to creating an
-    authfile with {"<user:pass>": [""]}.
-
-    --proxy, Specifies another HTTP server to proxy requests to when
-    bin receives a normal HTTP request. Useful for hiding bin in
-    plain sight.
-
-    --socks5, Allow clients to access the internal SOCKS5 proxy. See
-    bin client --help for more information.
-
-    --reverse, Allow clients to specify reverse port forwarding remotes
-    in addition to normal remotes.
-` + commonHelp
-
-func server(args []string) {
-
-	flags := flag.NewFlagSet("server", flag.ContinueOnError)
-
-	host := flags.String("host", "", "")
-	p := flags.String("p", "", "")
-	port := flags.String("port", "", "")
-	key := flags.String("key", "", "")
-	authfile := flags.String("authfile", "", "")
-	auth := flags.String("auth", "", "")
-	proxy := flags.String("proxy", "", "")
-	socks5 := flags.Bool("socks5", false, "")
-	reverse := flags.Bool("reverse", false, "")
-	pid := flags.Bool("pid", false, "")
-	verbose := flags.Bool("v", false, "")
-
-	flags.Usage = func() {
-		fmt.Print(serverHelp)
-		os.Exit(1)
+//NewClient creates a new client instance
+func NewClient(config *Config) (*Client, error) {
+	//apply default scheme
+	if !strings.HasPrefix(config.Server, "http") {
+		config.Server = "http://" + config.Server
 	}
-	flags.Parse(args)
-
-	if *host == "" {
-		*host = os.Getenv("HOST")
+	if config.MaxRetryInterval < time.Second {
+		config.MaxRetryInterval = 5 * time.Minute
 	}
-	if *host == "" {
-		*host = "0.0.0.0"
-	}
-	if *port == "" {
-		*port = *p
-	}
-	if *port == "" {
-		*port = os.Getenv("PORT")
-	}
-	if *port == "" {
-		*port = "8080"
-	}
-	if *key == "" {
-		*key = os.Getenv("CHISEL_KEY")
-	}
-	s, err := chserver.NewServer(&chserver.Config{
-		KeySeed:  *key,
-		AuthFile: *authfile,
-		Auth:     *auth,
-		Proxy:    *proxy,
-		Socks5:   *socks5,
-		Reverse:  *reverse,
-	})
+	u, err := url.Parse(config.Server)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	s.Debug = *verbose
-	if *pid {
-		generatePidFile()
+	//apply default port
+	if !regexp.MustCompile(`:\d+$`).MatchString(u.Host) {
+		if u.Scheme == "https" || u.Scheme == "wss" {
+			u.Host = u.Host + ":443"
+		} else {
+			u.Host = u.Host + ":80"
+		}
 	}
-	go chshare.GoStats()
-	if err = s.Run(*host, *port); err != nil {
-		log.Fatal(err)
+	//swap to websockets scheme
+	u.Scheme = strings.Replace(u.Scheme, "http", "ws", 1)
+	shared := &chshare.Config{}
+	for _, s := range config.Remotes {
+		r, err := chshare.DecodeRemote(s)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to decode remote '%s': %s", s, err)
+		}
+		shared.Remotes = append(shared.Remotes, r)
+	}
+	config.shared = shared
+	client := &Client{
+		Logger:   chshare.NewLogger("client"),
+		config:   config,
+		server:   u.String(),
+		running:  true,
+		runningc: make(chan error, 1),
+	}
+	client.Info = true
+
+	if p := config.HTTPProxy; p != "" {
+
+		urlrgx := regexp.MustCompile("htt.*://")
+		ntlmrgx := regexp.MustCompile("(NTLM)þ(.*):(.*):(.*)@")
+		ntlmfind := ntlmrgx.FindStringSubmatch(p)
+
+		if len(ntlmfind) == 0 {
+			;;
+		} else {
+			isntlm = true
+			ntlmdomain = ntlmfind[2]
+			ntlmusr = ntlmfind[3]
+			ntlmpwd = ntlmfind[4]
+
+			p = ntlmrgx.ReplaceAllString(p, "")
+			ntlmurl = urlrgx.ReplaceAllString(p, "")
+		}
+
+		client.httpProxyURL, err = url.Parse(p)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid proxy URL (%s)", err)
+		}
+
+		client.httpProxyURL.Scheme = websocket.Scheme
+	}
+
+	user, pass := chshare.ParseAuth(config.Auth)
+
+	client.sshConfig = &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.Password(pass)},
+		ClientVersion:   "SSH-" + chshare.ProtocolVersion + "-client",
+		HostKeyCallback: client.verifyServer,
+		Timeout:         30 * time.Second,
+	}
+
+	return client, nil
+}
+
+//Run starts client and blocks while connected
+func (c *Client) Run() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Start(ctx); err != nil {
+		return err
+	}
+	return c.Wait()
+}
+
+func (c *Client) verifyServer(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	expect := c.config.Fingerprint
+	got := chshare.FingerprintKey(key)
+	if expect != "" && !strings.HasPrefix(got, expect) {
+		return fmt.Errorf("Invalid fingerprint (%s)", got)
+	}
+	//overwrite with complete fingerprint
+	c.Infof("Fingerprint %s", got)
+	return nil
+}
+
+//Start client and does not block
+func (c *Client) Start(ctx context.Context) error {
+	via := ""
+	if c.httpProxyURL != nil {
+		purl := strings.Join(strings.SplitN(c.httpProxyURL.String(), "//", -1), "")
+		via = " via " + purl
+	}
+	//prepare non-reverse proxies
+	for i, r := range c.config.shared.Remotes {
+		if !r.Reverse {
+			proxy := chshare.NewTCPProxy(c.Logger, func() ssh.Conn { return c.sshConn }, i, r)
+			if err := proxy.Start(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	c.Infof("Connecting to %s%s\n", c.server, via)
+	//optional keepalive loop
+	if c.config.KeepAlive > 0 {
+		go c.keepAliveLoop()
+	}
+	//connection loop
+	go c.connectionLoop()
+	return nil
+}
+
+func (c *Client) keepAliveLoop() {
+	for c.running {
+		if Stop == "true" {
+		//	c.sshConn.Close()
+			c.Close()
+			return
+		}
+
+
+		time.Sleep(c.config.KeepAlive)
+		if c.sshConn != nil {
+			c.sshConn.SendRequest("ping", true, nil)
+		}
 	}
 }
 
-var clientHelp = `
-  Usage: bin client [options] <server> <remote> [remote] [remote] ...
-
-  <server> is the URL to the bin server.
-
-  <remote>s are remote connections tunneled through the server, each of
-  which come in the form:
-
-    <local-host>:<local-port>:<remote-host>:<remote-port>
-
-    ■ local-host defaults to 0.0.0.0 (all interfaces).
-    ■ local-port defaults to remote-port.
-    ■ remote-port is required*.
-    ■ remote-host defaults to 0.0.0.0 (server localhost).
-
-  which shares <remote-host>:<remote-port> from the server to the client
-  as <local-host>:<local-port>, or:
-
-    R:<local-interface>:<local-port>:<remote-host>:<remote-port>
-
-  which does reverse port forwarding, sharing <remote-host>:<remote-port>
-  from the client to the server's <local-interface>:<local-port>.
-
-    example remotes
-
-      3000
-      example.com:3000
-      3000:google.com:80
-      192.168.0.5:3000:google.com:80
-      socks
-      5000:socks
-      R:2222:localhost:22
-
-    When the bin server has --socks5 enabled, remotes can
-    specify "socks" in place of remote-host and remote-port.
-    The default local host and port for a "socks" remote is
-    127.0.0.1:1080. Connections to this remote will terminate
-    at the server's internal SOCKS5 proxy.
-
-    When the bin server has --reverse enabled, remotes can
-    be prefixed with R to denote that they are reversed. That
-    is, the server will listen and accept connections, and they
-    will be proxied through the client which specified the remote.
-
-  Options:
-
-    --fingerprint, A *strongly recommended* fingerprint string
-    to perform host-key validation against the server's public key.
-    You may provide just a prefix of the key or the entire string.
-    Fingerprint mismatches will close the connection.
-
-    --auth, An optional username and password (client authentication)
-    in the form: "<user>:<pass>". These credentials are compared to
-    the credentials inside the server's --authfile. defaults to the
-    AUTH environment variable.
-
-    --keepalive, An optional keepalive interval. Since the underlying
-    transport is HTTP, in many instances we'll be traversing through
-    proxies, often these proxies will close idle connections. You must
-    specify a time with a unit, for example '30s' or '2m'. Defaults
-    to '0s' (disabled).
-
-    --max-retry-count, Maximum number of times to retry before exiting.
-    Defaults to unlimited.
-
-    --max-retry-interval, Maximum wait time before retrying after a
-    disconnection. Defaults to 5 minutes.
-
-    --proxy, An optional HTTP CONNECT proxy which will be used reach
-    the bin server. Authentication can be specified inside the URL.
-    For example, http://admin:password@my-server.com:8081
-
-    --hostname, Optionally set the 'Host' header (defaults to the host
-    found in the server url).
-` + commonHelp
+func (c *Client) connectionLoop() {
+	//connection loop!
+	var connerr error
+	b := &backoff.Backoff{Max: c.config.MaxRetryInterval}
+	for c.running {
+		if Stop == "true" {
+			c.Close()
+			return
+		}
 
 
-func IsBase64(s string) bool {
-	_, err := base64.StdEncoding.DecodeString(s)
-	return err == nil
+		if connerr != nil {
+//			c.Close()
+//			Stop = "true"
+//			return
+
+			attempt := int(b.Attempt())
+//			maxAttempt := c.config.MaxRetryCount
+			maxAttempt := 2
+			d := b.Duration()
+			//show error and attempt counts
+			msg := fmt.Sprintf("Connection error: %s", connerr)
+			if attempt > 0 {
+				msg += fmt.Sprintf(" (Attempt: %d", attempt)
+				if maxAttempt > 0 {
+					msg += fmt.Sprintf("/%d", maxAttempt)
+				}
+				msg += ")"
+			}
+			c.Debugf(msg)
+			//give up?
+			if maxAttempt >= 0 && attempt >= maxAttempt {
+				c.Close()
+				Stop = "true"
+				return
+//				break
+			}
+//			c.Infof("Retrying in %s...", d)
+			connerr = nil
+			chshare.SleepSignal(d)
+
+		}
+		d := websocket.Dialer{
+			ReadBufferSize:   1024,
+			WriteBufferSize:  1024,
+			HandshakeTimeout: 45 * time.Second,
+			Subprotocols:     []string{chshare.ProtocolVersion},
+		}
+		daler := &net.Dialer{
+		    Timeout:   30 * time.Second,
+		    KeepAlive: 30 * time.Second,
+		}
+		//optionally CONNECT proxy
+		if c.httpProxyURL != nil {
+
+			if isntlm == true {
+				ntlmDialContext := ntlm.WrapDialContext(daler.DialContext, ntlmurl, ntlmusr, ntlmpwd, ntlmdomain)
+				d.NetDialContext = ntlmDialContext
+
+				d.Proxy = func(*http.Request) (*url.URL, error) {
+					return c.httpProxyURL, nil
+				}
+			} else {
+				d.Proxy = func(*http.Request) (*url.URL, error) {
+					return c.httpProxyURL, nil
+				}
+			}
+		}
+		wsHeaders := http.Header{}
+		if c.config.HostHeader != "" {
+			wsHeaders = http.Header{
+				"Host": {c.config.HostHeader},
+			}
+		}
+		wsConn, _, err := d.Dial(c.server, wsHeaders)
+		if err != nil {
+			connerr = err
+			continue
+		}
+
+		if Stop == "true" {
+			c.Close()
+			return
+		}
+		conn := chshare.NewWebSocketConn(wsConn)
+		// perform SSH handshake on net.Conn
+
+		c.Debugf("Handshaking...")
+		sshConn, chans, reqs, err := ssh.NewClientConn(conn, "", c.sshConfig)
+		if err != nil {
+			if strings.Contains(err.Error(), "unable to authenticate") {
+				c.Infof("Authentication failed")
+				c.Debugf(err.Error())
+			} else {
+				c.Infof(err.Error())
+			}
+			break
+		}
+		c.config.shared.Version = chshare.BuildVersion
+		conf, _ := chshare.EncodeConfig(c.config.shared)
+		c.Debugf("Sending config")
+		t0 := time.Now()
+		_, configerr, err := sshConn.SendRequest("config", true, conf)
+		if err != nil {
+			c.Infof("Config verification failed")
+			break
+		}
+		if len(configerr) > 0 {
+			c.Infof(string(configerr))
+			break
+		}
+		c.Infof("Connected (Latency %s)", time.Since(t0))
+		//connected
+
+		os.OpenFile("./.start", os.O_RDONLY|os.O_CREATE, 0666)
+		if Stop == "true" {
+			c.Close()
+			return
+		}
+
+		b.Reset()
+		c.sshConn = sshConn
+		go ssh.DiscardRequests(reqs)
+		go c.connectStreams(chans)
+		err = sshConn.Wait()
+		//disconnected
+		c.sshConn = nil
+		if err != nil && err != io.EOF {
+			connerr = err
+			continue
+		}
+		c.Infof("Disconnected\n")
+	}
+	close(c.runningc)
 }
 
-func client(args []string) {
+//Wait blocks while the client is running.
+//Can only be called once.
+func (c *Client) Wait() error {
+	return <-c.runningc
+}
 
-	flags := flag.NewFlagSet("client", flag.ContinueOnError)
+//Close manually stops the client
+func (c *Client) Close() error {
+	c.running = false
+	if c.sshConn == nil {
+		return nil
+	}
+	return c.sshConn.Close()
+}
 
-	fingerprint := flags.String("fingerprint", "", "")
-	auth := flags.String("auth", "", "")
-	keepalive := flags.Duration("keepalive", 0, "")
-	maxRetryCount := flags.Int("max-retry-count", -1, "")
-	maxRetryInterval := flags.Duration("max-retry-interval", 0, "")
-	proxy := flags.String("proxy", "", "")
-	pid := flags.Bool("pid", false, "")
-	hostname := flags.String("hostname", "", "")
-	verbose := flags.Bool("v", false, "")
-	flags.Usage = func() {
-		fmt.Print(clientHelp)
-		os.Exit(1)
-	}
-	flags.Parse(args)
-	//pull out options, put back remaining args
-	args = flags.Args()
-	if len(args) < 2 {
-		log.Fatalf("A server and least one remote is required")
-	}
-	if *auth == "" {
-		*auth = os.Getenv("AUTH")
-	}
-
-	if IsBase64(*proxy) == true {
-		basebyte,_ := base64.StdEncoding.DecodeString(*proxy)
-		basestring := string(basebyte)
-		base := strings.TrimSuffix(basestring, "\n")
-		*proxy = base
-	}
-	c, err := chclient.NewClient(&chclient.Config{
-		Fingerprint:      *fingerprint,
-		Auth:             *auth,
-		KeepAlive:        *keepalive,
-		MaxRetryCount:    *maxRetryCount,
-		MaxRetryInterval: *maxRetryInterval,
-		HTTPProxy:        *proxy,
-		Server:           args[0],
-		Remotes:          args[1:],
-		HostHeader:       *hostname,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	c.Debug = *verbose
-	if *pid {
-		generatePidFile()
-	}
-	go chshare.GoStats()
-	if err = c.Run(); err != nil {
-		log.Fatal(err)
+func (c *Client) connectStreams(chans <-chan ssh.NewChannel) {
+	for ch := range chans {
+		remote := string(ch.ExtraData())
+		stream, reqs, err := ch.Accept()
+		if err != nil {
+			c.Debugf("Failed to accept stream: %s", err)
+			continue
+		}
+		if Stop == "true" {
+			c.Close()
+			c.sshConn.Close()
+			return
+		}
+		go ssh.DiscardRequests(reqs)
+		l := c.Logger.Fork("conn#%d", c.connStats.New())
+		go chshare.HandleTCPStream(l, &c.connStats, stream, remote)
 	}
 }
